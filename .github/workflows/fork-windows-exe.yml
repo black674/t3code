@@ -1,0 +1,86 @@
+# Fork Windows EXE (preview builds for this fork).
+#
+# The full release pipeline (release.yml) needs signing credentials, npm
+# trusted publishing, and deploy secrets this fork does not have, so this
+# workflow builds just the unsigned Windows NSIS installer and uploads it
+# as a run artifact. No WSL runtime is embedded (no Linux CLI archive) and
+# nothing is published: download the .exe from the run and, if you want a
+# GitHub Release, attach it by hand to a NON-v* tag (a v*.*.* tag would
+# trigger release.yml).
+#
+# Run from the Actions tab. Windows runners already carry Visual Studio and
+# Rust; only the Spectre-mitigated libs and the msvc Rust target are added.
+name: Fork Windows EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Architecture
+        type: choice
+        options:
+          - x64
+          - arm64
+        default: x64
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build:
+    name: Build Windows ${{ inputs.arch }} EXE
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      # Same sparse checkout as release-desktop.yml: checkout's credential
+      # cleanup fails on the orphaned gitlinks in the vendored .repos tree.
+      - name: Checkout
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ github.ref }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach FETCH_HEAD
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: false
+          run-install: false
+
+      - name: Install desktop dependencies
+        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Add MSVC Rust target
+        shell: pwsh
+        run: rustup target add ${{ inputs.arch == 'arm64' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
+
+      - name: Install Spectre-mitigated MSVC libs
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.${{ inputs.arch == 'arm64' && 'ARM64' || 'x86.x64' }}.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "VS Spectre libs install failed: $($proc.ExitCode)" }
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: vp run dist:desktop:artifact -- --platform win --target nsis --arch ${{ inputs.arch }} --verbose
+
+      - name: Upload installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: t3-windows-${{ inputs.arch }}-exe
+          path: release/*
+          retention-days: 14
