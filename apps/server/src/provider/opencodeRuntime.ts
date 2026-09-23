@@ -206,11 +206,6 @@ export const loadOpenCodeCommands = (client: OpencodeClient) =>
     ),
   );
 
-export interface ParsedOpenCodeModelSlug {
-  readonly providerID: string;
-  readonly modelID: string;
-}
-
 export interface OpenCodeSkill {
   readonly name?: string | null;
   readonly description?: string | null;
@@ -415,25 +410,6 @@ export function parseAgentListCliOutput(stdout: string): ReadonlyArray<Agent> {
 export function parseSkillsCliOutput(stdout: string): ReadonlyArray<OpenCodeSkill> {
   const result = decodeOpenCodeSkillsCliOutputExit(stdout);
   return Exit.isSuccess(result) ? result.value : [];
-}
-
-export function parseOpenCodeModelSlug(
-  slug: string | null | undefined,
-): ParsedOpenCodeModelSlug | null {
-  if (typeof slug !== "string") {
-    return null;
-  }
-
-  const trimmed = slug.trim();
-  const separator = trimmed.indexOf("/");
-  if (separator <= 0 || separator === trimmed.length - 1) {
-    return null;
-  }
-
-  return {
-    providerID: trimmed.slice(0, separator),
-    modelID: trimmed.slice(separator + 1),
-  };
 }
 
 export function openCodeQuestionId(

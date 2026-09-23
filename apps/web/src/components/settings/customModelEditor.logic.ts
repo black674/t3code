@@ -101,6 +101,18 @@ export const DESCRIPTOR_PRESETS_BY_KIND: Partial<
       ],
     },
   ],
+  [ProviderDriverKind.make("opencodeV2")]: [
+    { id: "variant", label: "Reasoning", type: "select", choices: EFFORT_CHOICES },
+    {
+      id: "agent",
+      label: "Agent",
+      type: "select",
+      choices: [
+        { id: "build", label: "Build", isDefault: true },
+        { id: "plan", label: "Plan" },
+      ],
+    },
+  ],
 };
 
 let nextKey = 0;

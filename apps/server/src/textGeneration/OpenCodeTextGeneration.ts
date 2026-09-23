@@ -9,7 +9,7 @@ import {
   type OpenCodeSettings,
 } from "@t3tools/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
-import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { getModelSelectionStringOptionValue, splitProviderModelSlug } from "@t3tools/shared/model";
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
 import * as ServerConfig from "../config.ts";
@@ -185,7 +185,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     readonly modelSelection: ModelSelection;
     readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
   }) {
-    const parsedModel = OpenCodeRuntime.parseOpenCodeModelSlug(input.modelSelection.model);
+    const parsedModel = splitProviderModelSlug(input.modelSelection.model);
     if (!parsedModel) {
       return yield* new TextGenerationError({
         operation: input.operation,
@@ -432,6 +432,13 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
 
   const generateThreadTitle: TextGeneration.TextGeneration["Service"]["generateThreadTitle"] =
     Effect.fn("OpenCodeTextGeneration.generateThreadTitle")(function* (input) {
+      // Initial titles are automatic on every first turn: derive them
+      // locally from the user's message. A paid model call for "just a
+      // title" bills on every thread and fails the whole flow when out of
+      // credits — the message text is a free, instant, always-good title.
+      if (input.previousTitle === undefined) {
+        return { title: sanitizeThreadTitle(input.message) };
+      }
       const { prompt, outputSchema } = buildThreadTitlePrompt({
         message: input.message,
         previousTitle: input.previousTitle,

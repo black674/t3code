@@ -8,6 +8,7 @@ import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstance
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as ThreadTitleLinks from "./ThreadTitleLinks.ts";
+import { fallbackThreadTitleFromMessage, isBillingError } from "./TextGenerationUtils.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
 
 export interface CommitMessageGenerationInput {
@@ -164,6 +165,16 @@ export const make = Effect.gen(function* () {
               ));
             return yield* textGeneration.generateThreadTitle({ ...input, linkedContext });
           }),
+        ),
+        // Titles must never fail a thread on billing errors, for ANY
+        // provider: fall back to the message (or previous title) instead.
+        // Providers may still short-circuit obvious cases locally.
+        Effect.catch((error: TextGenerationError) =>
+          isBillingError(error)
+            ? Effect.succeed({
+                title: fallbackThreadTitleFromMessage(input.previousTitle ?? input.message),
+              })
+            : Effect.fail(error),
         ),
       ),
   });

@@ -5,7 +5,7 @@ import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import { describe, expect } from "vite-plus/test";
 
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId, TextGenerationError } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
@@ -174,6 +174,84 @@ describe("TextGeneration.make", () => {
         expect(result.failure.operation).toBe("generateBranchName");
         expect(result.failure.detail).toContain("missing_instance");
       }
+    }),
+  );
+
+  it.effect("falls back to a local title when any provider reports billing errors", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("codex");
+      const instance = makeStubInstance(
+        instanceId,
+        makeStubTextGeneration({
+          generateThreadTitle: () =>
+            Effect.fail(
+              new TextGenerationError({
+                operation: "generateThreadTitle",
+                detail: "You're out of credits - this request needs $0.0085.",
+              }),
+            ),
+        }),
+      );
+      const tg = yield* TextGeneration.make.pipe(
+        Effect.provideService(
+          ProviderInstanceRegistry.ProviderInstanceRegistry,
+          makeStubRegistry([instance]),
+        ),
+        Effect.provide(
+          Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+            resolveLink: () => Effect.die("No link lookup expected"),
+          }),
+        ),
+      );
+
+      const result = yield* tg.generateThreadTitle({
+        cwd: process.cwd(),
+        message: "Fix the failing pairing test",
+        linkedContext: "ctx",
+        modelSelection: createModelSelection(instanceId, "gpt-5"),
+      });
+      expect(result).toEqual({ title: "Fix the failing pairing test" });
+    }),
+  );
+
+  it.effect("propagates non-billing title failures", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("codex");
+      const instance = makeStubInstance(
+        instanceId,
+        makeStubTextGeneration({
+          generateThreadTitle: () =>
+            Effect.fail(
+              new TextGenerationError({
+                operation: "generateThreadTitle",
+                detail: "Model not found: nope/nope",
+              }),
+            ),
+        }),
+      );
+      const tg = yield* TextGeneration.make.pipe(
+        Effect.provideService(
+          ProviderInstanceRegistry.ProviderInstanceRegistry,
+          makeStubRegistry([instance]),
+        ),
+        Effect.provide(
+          Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+            resolveLink: () => Effect.die("No link lookup expected"),
+          }),
+        ),
+      );
+
+      const result = yield* tg
+        .generateThreadTitle({
+          cwd: process.cwd(),
+          message: "Fix the failing pairing test",
+          linkedContext: "ctx",
+          modelSelection: createModelSelection(instanceId, "gpt-5"),
+        })
+        .pipe(Effect.flip);
+
+      expect(result).toBeInstanceOf(TextGenerationError);
+      expect(result.detail).toContain("Model not found");
     }),
   );
 });

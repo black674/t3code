@@ -11,6 +11,7 @@ import {
   getModelSelectionStringOptionValue,
   getProviderOptionDescriptors,
   readCustomModelEntries,
+  splitProviderModelSlug,
   toCustomModelSetting,
   getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
@@ -242,5 +243,27 @@ describe("readCustomModelEntries", () => {
       name: "X",
       capabilities,
     });
+  });
+});
+
+describe("splitProviderModelSlug", () => {
+  it("splits provider/model slugs", () => {
+    expect(splitProviderModelSlug("openai/gpt-5")).toEqual({
+      providerID: "openai",
+      modelID: "gpt-5",
+    });
+    expect(splitProviderModelSlug("  orcarouter/free  ")).toEqual({
+      providerID: "orcarouter",
+      modelID: "free",
+    });
+  });
+
+  it("rejects missing or malformed slugs", () => {
+    expect(splitProviderModelSlug(null)).toBeNull();
+    expect(splitProviderModelSlug(undefined)).toBeNull();
+    expect(splitProviderModelSlug("bare")).toBeNull();
+    expect(splitProviderModelSlug("/model")).toBeNull();
+    expect(splitProviderModelSlug("provider/")).toBeNull();
+    expect(splitProviderModelSlug("  ")).toBeNull();
   });
 });

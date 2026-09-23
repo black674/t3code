@@ -9,7 +9,6 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   ThreadId,
-  type ToolLifecycleItemType,
   type TurnTokenUsage,
   TurnId,
   type UserInputQuestion,
@@ -52,13 +51,14 @@ import {
   openCodeQuestionId,
   openCodeRuntimeErrorDetail,
   loadOpenCodeCommands,
-  parseOpenCodeModelSlug,
   runOpenCodeSdk,
   toOpenCodeFileParts,
   toOpenCodePermissionReply,
   toOpenCodeQuestionAnswers,
   type OpenCodeServerConnection,
 } from "../opencodeRuntime.ts";
+import { mapToolNameToItemType } from "@t3tools/shared/toolActivity";
+import { splitProviderModelSlug } from "@t3tools/shared/model";
 import * as Option from "effect/Option";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
@@ -502,41 +502,6 @@ type EventBaseInput = {
   readonly createdAt?: string | undefined;
   readonly raw?: unknown;
 };
-
-function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
-  const normalized = toolName.toLowerCase();
-  if (normalized === "todowrite" || normalized === "todoread") {
-    return "dynamic_tool_call";
-  }
-  if (normalized.includes("bash") || normalized.includes("command")) {
-    return "command_execution";
-  }
-  if (
-    normalized.includes("edit") ||
-    normalized.includes("write") ||
-    normalized.includes("patch") ||
-    normalized.includes("multiedit")
-  ) {
-    return "file_change";
-  }
-  if (normalized.includes("web")) {
-    return "web_search";
-  }
-  if (normalized.includes("mcp")) {
-    return "mcp_tool_call";
-  }
-  if (normalized.includes("image")) {
-    return "image_view";
-  }
-  if (
-    normalized.includes("task") ||
-    normalized.includes("agent") ||
-    normalized.includes("subtask")
-  ) {
-    return "collab_agent_tool_call";
-  }
-  return "dynamic_tool_call";
-}
 
 function mapPermissionToRequestType(
   permission: string,
@@ -2483,7 +2448,7 @@ export function makeOpenCodeAdapter(
           }
 
           if (part.type === "tool") {
-            const itemType = toToolLifecycleItemType(part.tool);
+            const itemType = mapToolNameToItemType(part.tool);
             const title =
               part.state.status === "running" || part.state.status === "completed"
                 ? (part.state.title ?? part.tool)
@@ -3107,7 +3072,7 @@ export function makeOpenCodeAdapter(
           issue: `OpenCode model selection is bound to instance '${modelSelection?.instanceId}', expected '${boundInstanceId}'.`,
         });
       }
-      const parsedModel = parseOpenCodeModelSlug(modelSelection?.model);
+      const parsedModel = splitProviderModelSlug(modelSelection?.model);
       if (!parsedModel) {
         return yield* new ProviderAdapterValidationError({
           provider: PROVIDER,
@@ -3552,7 +3517,7 @@ export function makeOpenCodeAdapter(
           issue: `OpenCode model selection is bound to instance '${modelSelection.instanceId}', expected '${boundInstanceId}'.`,
         });
       }
-      const parsedModel = parseOpenCodeModelSlug(modelSelection?.model);
+      const parsedModel = splitProviderModelSlug(modelSelection?.model);
       if (!parsedModel) {
         return yield* new ProviderAdapterValidationError({
           provider: PROVIDER,

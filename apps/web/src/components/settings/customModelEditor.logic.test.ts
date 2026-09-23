@@ -19,6 +19,13 @@ const draft = (overrides: Partial<CustomModelDraft>): CustomModelDraft => ({
 });
 
 describe("customModelEditor.logic", () => {
+  it("offers variant and agent presets for both OpenCode providers", () => {
+    for (const driver of ["opencode", "opencodeV2"] as const) {
+      const presets = DESCRIPTOR_PRESETS_BY_KIND[ProviderDriverKind.make(driver)];
+      expect(presets?.map((preset) => preset.id)).toEqual(["variant", "agent"]);
+    }
+  });
+
   it("round-trips a definition through the draft, marking the current value as default", () => {
     const definition = definitionFromDraft(
       draft({

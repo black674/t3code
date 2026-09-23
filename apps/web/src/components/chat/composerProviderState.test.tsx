@@ -268,6 +268,27 @@ describe("getComposerProviderState", () => {
     );
   });
 
+  it("preserves explicit options when the selected v2 model is absent from the catalog", () => {
+    const state = getComposerProviderState({
+      provider: ProviderDriverKind.make("opencodeV2"),
+      model: "opencode/kimi-k3",
+      models: [
+        {
+          slug: "opencode/big-pickle",
+          name: "Big Pickle",
+          isCustom: false,
+          capabilities: {},
+        },
+      ],
+      modelOptions: selections(["variant", "max"], ["agent", "build"]),
+      planModeEnabled: false,
+    });
+
+    expect(state.modelOptionsForDispatch).toEqual(
+      selections(["variant", "max"], ["agent", "build"]),
+    );
+  });
+
   it.each(["codex", "claudeAgent", "cursor", "grok"])(
     "does not preserve unknown options for a missing %s model",
     (provider) => {

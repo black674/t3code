@@ -10,7 +10,7 @@
  *
  *  2. **Many drivers, one registry** — the "all drivers slice" describe
  *     block below configures one instance of every shipped driver
- *     (`codex`, `claudeAgent`, `cursor`, `grok`, `opencode`) in a single
+ *     (`codex`, `claudeAgent`, `cursor`, `grok`, `opencode`, `opencodeV2`) in a single
  *     `ProviderInstanceConfigMap` and asserts the registry boots them all
  *     without cross-contamination. This proves the driver SPI is uniform
  *     across every provider — any driver plugs into the registry through
@@ -30,6 +30,7 @@ import {
   type CursorSettings,
   type GrokSettings,
   type OpenCodeSettings,
+  type OpenCodeV2Settings,
   ProviderDriverKind,
   type ProviderInstanceConfigMap,
   ProviderInstanceId,
@@ -54,8 +55,10 @@ import { CodexDriver } from "../Drivers/CodexDriver.ts";
 import { CursorDriver } from "../Drivers/CursorDriver.ts";
 import { GrokDriver } from "../Drivers/GrokDriver.ts";
 import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
+import { OpenCodeV2Driver } from "../Drivers/OpenCodeV2Driver.ts";
 import * as ModelManifest from "../ModelManifest.ts";
 import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
+import { OpenCodeV2RuntimeLive } from "../opencodeV2Runtime.ts";
 import * as CodexResetCredit from "./codexResetCredit.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
@@ -134,6 +137,15 @@ const makeGrokConfig = (overrides: Partial<GrokSettings>): GrokSettings => ({
 });
 
 const makeOpenCodeConfig = (overrides: Partial<OpenCodeSettings>): OpenCodeSettings => ({
+  enabled: false,
+  binaryPath: "opencode",
+  serverUrl: "",
+  serverPassword: "",
+  customModels: [],
+  ...overrides,
+});
+
+const makeOpenCodeV2Config = (overrides: Partial<OpenCodeV2Settings>): OpenCodeV2Settings => ({
   enabled: false,
   binaryPath: "opencode",
   serverUrl: "",
@@ -446,7 +458,10 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
   // provides `OpenCodeRuntimeLive`'s deps while keeping its own outputs
   // surfaced; that merged layer then provides `ServerConfig.layerTest`'s
   // `FileSystem` dep while keeping everything else surfaced to the test.
-  const infraLayer = OpenCodeRuntimeLive.pipe(Layer.provideMerge(NodeServices.layer));
+  const infraLayer = OpenCodeRuntimeLive.pipe(
+    Layer.provideMerge(OpenCodeV2RuntimeLive),
+    Layer.provideMerge(NodeServices.layer),
+  );
   const testLayer = AntigravityInstallation.layer.pipe(
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), {
@@ -469,12 +484,14 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       const cursorId = ProviderInstanceId.make("cursor_default");
       const grokId = ProviderInstanceId.make("grok_default");
       const openCodeId = ProviderInstanceId.make("opencode_default");
+      const openCodeV2Id = ProviderInstanceId.make("opencodeV2_default");
 
       const codexDriverKind = ProviderDriverKind.make("codex");
       const claudeDriverKind = ProviderDriverKind.make("claudeAgent");
       const cursorDriverKind = ProviderDriverKind.make("cursor");
       const grokDriverKind = ProviderDriverKind.make("grok");
       const openCodeDriverKind = ProviderDriverKind.make("opencode");
+      const openCodeV2DriverKind = ProviderDriverKind.make("opencodeV2");
 
       const configMap: ProviderInstanceConfigMap = {
         [codexId]: {
@@ -510,10 +527,23 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
           enabled: false,
           config: makeOpenCodeConfig({}),
         },
+        [openCodeV2Id]: {
+          driver: openCodeV2DriverKind,
+          displayName: "OpenCode V2",
+          enabled: false,
+          config: makeOpenCodeV2Config({}),
+        },
       };
 
       const { registry } = yield* makeProviderInstanceRegistry<BuiltInDriversEnv>({
-        drivers: [CodexDriver, ClaudeDriver, CursorDriver, GrokDriver, OpenCodeDriver],
+        drivers: [
+          CodexDriver,
+          ClaudeDriver,
+          CursorDriver,
+          GrokDriver,
+          OpenCodeDriver,
+          OpenCodeV2Driver,
+        ],
         configMap,
       });
 
@@ -523,9 +553,9 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(unavailable).toEqual([]);
 
       const instances = yield* registry.listInstances;
-      expect(instances).toHaveLength(5);
+      expect(instances).toHaveLength(6);
       expect(instances.map((instance) => instance.instanceId).toSorted()).toEqual(
-        [codexId, claudeId, cursorId, grokId, openCodeId].toSorted(),
+        [codexId, claudeId, cursorId, grokId, openCodeId, openCodeV2Id].toSorted(),
       );
 
       // Instance lookup by id resolves each instance to its own bundle —
@@ -536,16 +566,19 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       const cursor = yield* registry.getInstance(cursorId);
       const grok = yield* registry.getInstance(grokId);
       const openCode = yield* registry.getInstance(openCodeId);
+      const openCodeV2 = yield* registry.getInstance(openCodeV2Id);
       expect(codex?.driverKind).toBe(codexDriverKind);
       expect(claude?.driverKind).toBe(claudeDriverKind);
       expect(cursor?.driverKind).toBe(cursorDriverKind);
       expect(grok?.driverKind).toBe(grokDriverKind);
       expect(openCode?.driverKind).toBe(openCodeDriverKind);
+      expect(openCodeV2?.driverKind).toBe(openCodeV2DriverKind);
       expect(codex?.displayName).toBe("Codex");
       expect(claude?.displayName).toBe("Claude");
       expect(cursor?.displayName).toBe("Cursor");
       expect(grok?.displayName).toBe("Grok");
       expect(openCode?.displayName).toBe("OpenCode");
+      expect(openCodeV2?.displayName).toBe("OpenCode V2");
 
       // Every instance owns its own set of closures — no sharing across
       // drivers. `adapter` / `textGeneration` / `snapshot` are all
@@ -558,6 +591,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         cursor!.adapter,
         grok!.adapter,
         openCode!.adapter,
+        openCodeV2!.adapter,
       ];
       expect(new Set(adapters).size).toBe(adapters.length);
       const textGenerations = [
@@ -566,6 +600,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         cursor!.textGeneration,
         grok!.textGeneration,
         openCode!.textGeneration,
+        openCodeV2!.textGeneration,
       ];
       expect(new Set(textGenerations).size).toBe(textGenerations.length);
       const snapshots = [
@@ -574,6 +609,7 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         cursor!.snapshot,
         grok!.snapshot,
         openCode!.snapshot,
+        openCodeV2!.snapshot,
       ];
       expect(new Set(snapshots).size).toBe(snapshots.length);
 
@@ -619,6 +655,14 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(openCodeSnapshot.enabled).toBe(false);
       expect(openCodeSnapshot.continuation?.groupKey).toBe(
         `${openCodeDriverKind}:instance:${openCodeId}`,
+      );
+
+      const openCodeV2Snapshot = yield* openCodeV2!.snapshot.getSnapshot;
+      expect(openCodeV2Snapshot.instanceId).toBe(openCodeV2Id);
+      expect(openCodeV2Snapshot.driver).toBe(openCodeV2DriverKind);
+      expect(openCodeV2Snapshot.enabled).toBe(false);
+      expect(openCodeV2Snapshot.continuation?.groupKey).toBe(
+        `${openCodeV2DriverKind}:instance:${openCodeV2Id}`,
       );
     }).pipe(Effect.provide(testLayer)),
   );

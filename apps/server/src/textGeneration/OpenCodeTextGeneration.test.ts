@@ -235,16 +235,10 @@ const advanceIdleClock = Effect.gen(function* () {
 });
 
 it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
-  it.effect("excludes generic files from thread title generation", () =>
+  it.effect("derives initial thread titles locally without billing a model", () =>
     withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
       Effect.gen(function* () {
-        runtimeMock.state.promptResult = {
-          data: {
-            parts: [{ type: "text", text: '{"title":"Review uploaded report"}' }],
-          },
-        };
-
-        yield* textGeneration.generateThreadTitle({
+        const generated = yield* textGeneration.generateThreadTitle({
           cwd: process.cwd(),
           message: "Review these attachments.",
           modelSelection: DEFAULT_TEST_MODEL_SELECTION,
@@ -256,20 +250,66 @@ it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
               mimeType: "image/png",
               sizeBytes: 3,
             },
-            {
-              type: "file",
-              id: "thread-report-attachment-pdf",
-              name: "report.pdf",
-              mimeType: "application/pdf",
-              sizeBytes: 42,
-            },
           ],
         });
 
-        expect(runtimeMock.state.promptParts[0]).toEqual([
-          expect.objectContaining({ type: "text" }),
-          expect.objectContaining({ type: "file", filename: "screenshot.png" }),
-        ]);
+        expect(generated).toEqual({ title: "Review these attachments." });
+        expect(runtimeMock.state.sessionCreateCalls).toBe(0);
+        expect(runtimeMock.state.promptParts).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("uses AI for explicit thread title regenerations", () =>
+    withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.promptResult = {
+          data: {
+            parts: [{ type: "text", text: '{"title":"Review uploaded report"}' }],
+          },
+        };
+
+        const generated = yield* textGeneration.generateThreadTitle({
+          cwd: process.cwd(),
+          message: "USER:\nReview these attachments.",
+          previousTitle: "hello",
+          modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+        });
+
+        expect(generated).toEqual({ title: "Review uploaded report" });
+        expect(runtimeMock.state.sessionCreateCalls).toBe(1);
+      }),
+    ),
+  );
+
+  it.effect("propagates billing errors so the shared layer can fall back", () =>
+    withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.promptResult = {
+          data: {
+            info: {
+              error: {
+                name: "ProviderError",
+                data: {
+                  message:
+                    "You're out of credits - this request needs $0.0085. Add credits to keep going",
+                },
+              },
+            },
+          },
+        };
+
+        const error = yield* textGeneration
+          .generateThreadTitle({
+            cwd: process.cwd(),
+            message: "USER:\nReview these attachments.",
+            previousTitle: "Review these attachments.",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(TextGenerationError);
+        expect(error.message).toContain("out of credits");
       }),
     ),
   );

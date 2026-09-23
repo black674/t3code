@@ -196,6 +196,46 @@ export interface ToolActivityPresentation {
   readonly detail?: string | undefined;
 }
 
+/**
+ * Map a tool name to its timeline item type. Shared by the OpenCode v1 and
+ * v2 adapters so rows get the same icons and detail extractors on both
+ * providers.
+ */
+export function mapToolNameToItemType(toolName: string): ToolLifecycleItemType {
+  const normalized = toolName.toLowerCase();
+  if (normalized === "todowrite" || normalized === "todoread") {
+    return "dynamic_tool_call";
+  }
+  if (normalized.includes("bash") || normalized.includes("command") || normalized === "shell") {
+    return "command_execution";
+  }
+  if (
+    normalized.includes("edit") ||
+    normalized.includes("write") ||
+    normalized.includes("patch") ||
+    normalized.includes("multiedit")
+  ) {
+    return "file_change";
+  }
+  if (normalized.includes("web")) {
+    return "web_search";
+  }
+  if (normalized.includes("mcp")) {
+    return "mcp_tool_call";
+  }
+  if (normalized.includes("image")) {
+    return "image_view";
+  }
+  if (
+    normalized.includes("task") ||
+    normalized.includes("agent") ||
+    normalized.includes("subtask")
+  ) {
+    return "collab_agent_tool_call";
+  }
+  return "dynamic_tool_call";
+}
+
 export function deriveToolActivityPresentation(
   input: ToolActivityPresentationInput,
 ): ToolActivityPresentation {

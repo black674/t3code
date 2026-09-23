@@ -127,3 +127,47 @@ export function normalizeCliError(
     cause: error,
   });
 }
+
+const BILLING_ERROR_PATTERN =
+  /out of credits|insufficient.*credit|add credits|billing|payment required|quota|rate.limit|free models are not available|free tier|429|402|403|401|forbidden|unauthorized|access denied/i;
+
+/** True when a text-generation failure is a billing/credits problem (do not retry). */
+export function isBillingError(error: unknown): boolean {
+  const parts: Array<string> = [];
+  const collect = (value: unknown, depth: number): void => {
+    if (depth > 4 || value === null || value === undefined) return;
+    if (typeof value === "string") {
+      if (value.trim().length > 0) parts.push(value);
+      return;
+    }
+    if (value instanceof Error) {
+      parts.push(value.message);
+      collect((value as { cause?: unknown }).cause, depth + 1);
+      return;
+    }
+    if (typeof value === "object") {
+      for (const key of ["detail", "message", "errorMessage", "providerMessage", "error"]) {
+        const field = (value as Record<string, unknown>)[key];
+        if (typeof field === "string" && field.trim().length > 0) parts.push(field);
+      }
+      for (const key of ["cause", "error", "data"] as const) {
+        const nested = (value as Record<string, unknown>)[key];
+        if (nested !== undefined && (typeof nested === "object" || nested instanceof Error)) {
+          collect(nested, depth + 1);
+        }
+      }
+    }
+  };
+  collect(error, 0);
+  if (parts.length === 0) return false;
+  return BILLING_ERROR_PATTERN.test(parts.join("\n"));
+}
+
+/**
+ * Local non-AI fallback for thread titles. Used when the provider bills
+ * (out of credits) or the model is unavailable — keeps the sidebar useful
+ * without spending another paid call. Mirrors `sanitizeThreadTitle` rules.
+ */
+export function fallbackThreadTitleFromMessage(message: string): string {
+  return sanitizeThreadTitle(message);
+}

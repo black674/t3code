@@ -57,6 +57,7 @@ import {
   formatThreadTitleContext,
   type ThreadTitleMessage,
 } from "../../textGeneration/ThreadTitleContext.ts";
+import { isBillingError } from "../../textGeneration/TextGenerationUtils.ts";
 import { canReplaceThreadTitle, DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
 import {
   resolveSourceControlWriterModelSelection,
@@ -978,6 +979,9 @@ const make = Effect.gen(function* () {
             Effect.retry({
               times: 2,
               schedule: Schedule.exponential("2 seconds"),
+              // Billing/credits errors never succeed on retry — fail fast
+              // so we don't burn 3x paid calls (e.g. OrcaRouter $0.0085/title).
+              while: (error) => !isBillingError(error),
             }),
           );
         if (!generated) return;

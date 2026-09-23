@@ -103,7 +103,10 @@ export function upsertProviderWorkspaceSnapshot(
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
   const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
   const isCodex = provider.driver === ProviderDriverKind.make("codex");
-  if (!isAntigravity && !isCodex && provider.driver !== ProviderDriverKind.make("opencode")) {
+  const isOpenCodeFamily =
+    provider.driver === ProviderDriverKind.make("opencode") ||
+    provider.driver === ProviderDriverKind.make("opencodeV2");
+  if (!isAntigravity && !isCodex && !isOpenCodeFamily) {
     return true;
   }
 
@@ -127,7 +130,8 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
 };
 
 const shouldRetainMissingOpenCodeMetadata = (provider: ServerProvider): boolean =>
-  provider.driver === ProviderDriverKind.make("opencode") &&
+  (provider.driver === ProviderDriverKind.make("opencode") ||
+    provider.driver === ProviderDriverKind.make("opencodeV2")) &&
   shouldRetainMissingProviderModels(provider);
 
 const mergeProviderModels = (
