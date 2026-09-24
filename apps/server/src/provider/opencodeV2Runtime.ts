@@ -318,7 +318,10 @@ export interface OpenCodeV2RuntimeShape {
     readonly baseUrl: string;
     readonly serverPassword?: string;
     readonly sessionId: string;
-  }) => Effect.Effect<{ readonly revertMessageId?: string }, OpenCodeV2RuntimeError>;
+  }) => Effect.Effect<
+    { readonly revertMessageId?: string; readonly directory?: string },
+    OpenCodeV2RuntimeError
+  >;
   readonly updateSessionPermissions: (input: {
     readonly baseUrl: string;
     readonly serverPassword?: string;
@@ -1143,7 +1146,22 @@ const makeOpenCodeV2Runtime = Effect.gen(function* () {
           : undefined;
       const revertMessageId =
         revert !== undefined && typeof revert.messageID === "string" ? revert.messageID : undefined;
-      return { ...(revertMessageId === undefined ? {} : { revertMessageId }) };
+      // Verified against the 2.0.15 server: sessions carry
+      // `location: { directory }` (same shape `session.create` sends).
+      const record = data as Record<string, unknown>;
+      const location =
+        record.location !== null && typeof record.location === "object"
+          ? (record.location as Record<string, unknown>)
+          : undefined;
+      const rawDirectory = location?.directory ?? record.directory;
+      const directory =
+        typeof rawDirectory === "string" && rawDirectory.trim().length > 0
+          ? rawDirectory
+          : undefined;
+      return {
+        ...(revertMessageId === undefined ? {} : { revertMessageId }),
+        ...(directory === undefined ? {} : { directory }),
+      };
     }).pipe(Effect.withSpan("opencodeV2.session.get"));
 
   const listMessages: OpenCodeV2RuntimeShape["listMessages"] = (input) =>

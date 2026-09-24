@@ -6,7 +6,10 @@
  * - `sendTurn` → `POST /api/session/{id}/prompt` (returns the user message
  *   immediately; the assistant streams over SSE)
  * - `interruptTurn` → `POST /api/session/{id}/interrupt`
- * - `stopSession` → `DELETE /api/session/{id}` (best-effort)
+ * - `stopSession` → best-effort interrupt + local teardown. The native
+ *   session is deliberately KEPT server-side so a persisted resumeCursor
+ *   can re-adopt it after reaper sweeps / restarts (mirrors v1, which
+ *   aborts but never deletes).
  * - `streamEvents` → `GET /api/event` (SSE) mapped to `content.delta`,
  *   `turn.completed`/`turn.aborted`, `item.*` for tools, and
  *   `turn.plan.updated` synthesized from todowrite/todoread input
@@ -45,6 +48,9 @@ import {
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -88,6 +94,90 @@ function parseResume(raw: unknown): { readonly sessionId: string } | undefined {
   if (typeof record.sessionId !== "string" || record.sessionId.trim().length === 0)
     return undefined;
   return { sessionId: record.sessionId.trim() };
+}
+
+/**
+ * Whether an error definitively reports a missing v2 session. Only a
+ * confirmed miss may silently start a fresh session; any other failure must
+ * propagate, or a transient blip resets a live thread to an empty one —
+ * the same silent context loss v1 guards against. Decides on structured
+ * signals only: a numeric 404, an `HTTP 404` detail emitted by
+ * `opencodeV2Runtime.executeJson`, or the exact `NotFoundError` name, found
+ * via a bounded walk over `cause`/`body`/`error`/`data`. An explicit
+ * non-404 status seals its subtree. Exported for unit testing.
+ */
+export function isOpenCodeV2NotFound(cause: unknown): boolean {
+  const seen = new Set<unknown>();
+  const queue: Array<unknown> = [cause];
+  for (let steps = 0; queue.length > 0 && steps < 32; steps += 1) {
+    const node = queue.shift();
+    if (node === null || typeof node !== "object" || seen.has(node)) {
+      continue;
+    }
+    seen.add(node);
+    const record = node as Record<string, unknown>;
+
+    const response = record.response;
+    const statuses = [
+      record.status,
+      record.statusCode,
+      response !== null && typeof response === "object"
+        ? (response as { readonly status?: unknown }).status
+        : undefined,
+    ].filter((status): status is number => typeof status === "number");
+    if (statuses.includes(404)) {
+      return true;
+    }
+    if (statuses.length > 0) {
+      continue;
+    }
+
+    for (const key of ["detail", "message"] as const) {
+      const value = record[key];
+      if (typeof value === "string" && /HTTP\s+404\b/.test(value)) {
+        return true;
+      }
+    }
+
+    const name = record.name;
+    if (typeof name === "string" && name.toLowerCase() === "notfounderror") {
+      return true;
+    }
+
+    for (const key of ["cause", "body", "error", "data"] as const) {
+      if (record[key] !== undefined) {
+        queue.push(record[key]);
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether two directory spellings name the same location. Same lexical /
+ * realPath widening as v1's `isSameOpenCodeDirectory` (duplicated here to
+ * keep this adapter independent of `OpenCodeAdapter`): raw string equality
+ * misreads trailing slashes and symlinked cwds as a directory change and
+ * would needlessly drop conversation history on every resume.
+ */
+export function isSameV2Directory(
+  fileSystem: FileSystem.FileSystem,
+  path: Path.Path,
+  left: string,
+  right: string,
+): Effect.Effect<boolean> {
+  const lexicalLeft = path.resolve(left);
+  const lexicalRight = path.resolve(right);
+  if (lexicalLeft === lexicalRight) {
+    return Effect.succeed(true);
+  }
+  const canonicalize = (lexical: string) =>
+    fileSystem.realPath(lexical).pipe(Effect.orElseSucceed(() => lexical));
+  return Effect.zipWith(
+    canonicalize(lexicalLeft),
+    canonicalize(lexicalRight),
+    (canonicalLeft, canonicalRight) => canonicalLeft === canonicalRight,
+  );
 }
 
 interface V2SessionContext {
@@ -617,6 +707,10 @@ export function makeOpenCodeV2Adapter(
     const runtime = yield* OpenCodeV2Runtime;
     const crypto = yield* Crypto.Crypto;
     const httpClient = yield* HttpClient.HttpClient;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    const sameDirectory = (left: string, right: string) =>
+      isSameV2Directory(fileSystem, pathService, left, right);
     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessions = new Map<ThreadId, V2SessionContext>();
 
@@ -1161,82 +1255,150 @@ export function makeOpenCodeV2Adapter(
         }
         const sessionScope = yield* Scope.make();
         const serverPassword = settings.serverPassword.trim();
-        const server = yield* runtime
-          .connectToServer({
-            binaryPath: settings.binaryPath,
+        // The scope owns the spawned server child (via the Scope finalizer
+        // installed in `connectToServer`). Close it on failure so a failed
+        // resume/probe cannot orphan a server process.
+        const startExit = yield* Effect.gen(function* () {
+          const server = yield* runtime
+            .connectToServer({
+              binaryPath: settings.binaryPath,
+              directory,
+              ...(settings.serverUrl.trim().length > 0 ? { serverUrl: settings.serverUrl } : {}),
+              ...(serverPassword.length > 0 ? { serverPassword } : {}),
+              environment: options?.environment ?? process.env,
+            })
+            .pipe(
+              Effect.mapError((cause) => toRequestError("connectToServer", cause)),
+              Effect.provideService(Scope.Scope, sessionScope),
+            );
+          const created = yield* Effect.gen(function* () {
+            const auth =
+              server.serverPassword === undefined
+                ? { baseUrl: server.url }
+                : { baseUrl: server.url, serverPassword: server.serverPassword };
+            if (resumeSessionId !== undefined) {
+              const adopted = yield* runtime
+                .getSessionInfo({ ...auth, sessionId: resumeSessionId })
+                .pipe(
+                  Effect.map((info) => ({ id: resumeSessionId, directory: info.directory })),
+                  Effect.catchIf(
+                    (cause) => isOpenCodeV2NotFound(cause),
+                    () => Effect.void,
+                  ),
+                  Effect.mapError((cause) => toRequestError("session.get", cause)),
+                );
+              if (adopted !== undefined) {
+                // Reuse in place only when the session still matches the
+                // requested cwd. The v2 `fork` endpoint cannot retarget the
+                // directory (verified against 2.0.15: it silently keeps the
+                // parent's), so unlike v1 there is no fork-into-directory
+                // fallback — a moved thread starts fresh in the right
+                // directory rather than running in the wrong one.
+                const reusable =
+                  adopted.directory === undefined ||
+                  (yield* sameDirectory(adopted.directory, directory))
+                    ? adopted
+                    : undefined;
+                if (reusable !== undefined) {
+                  // Resume skips `session.create`, so re-assert the ruleset —
+                  // a runtime-mode change would otherwise leave the session on
+                  // its original permissions.
+                  yield* runtime
+                    .updateSessionPermissions({
+                      ...auth,
+                      sessionId: reusable.id,
+                      permissions: buildV2PermissionRules(input.runtimeMode),
+                    })
+                    .pipe(Effect.mapError((cause) => toRequestError("session.update", cause)));
+                  return reusable;
+                }
+                yield* Effect.logWarning(
+                  `OpenCode V2 session '${resumeSessionId}' was created under a different working directory; starting a fresh session in '${directory}' to avoid running in the wrong directory.`,
+                ).pipe(Effect.ignore);
+              } else {
+                yield* Effect.logWarning(
+                  `OpenCode V2 session '${resumeSessionId}' no longer exists; starting a fresh session.`,
+                ).pipe(Effect.ignore);
+              }
+            }
+            return yield* runtime
+              .createSession({
+                baseUrl: server.url,
+                ...(server.serverPassword === undefined
+                  ? {}
+                  : { serverPassword: server.serverPassword }),
+                directory,
+                ...(input.title ? { title: input.title } : {}),
+                ...(input.modelSelection?.model ? { modelSlug: input.modelSelection.model } : {}),
+                ...(selectedVariant ? { variant: selectedVariant } : {}),
+                ...(selectedAgent ? { agent: selectedAgent } : {}),
+                permissions: buildV2PermissionRules(input.runtimeMode),
+              })
+              .pipe(Effect.mapError((cause) => toRequestError("session.create", cause)));
+          });
+          const createdAt = yield* nowIso;
+          const session: ProviderSession = {
+            provider: PROVIDER,
+            providerInstanceId: boundInstanceId,
+            status: "ready",
+            runtimeMode: input.runtimeMode,
+            cwd: directory,
+            ...(input.modelSelection?.model ? { model: input.modelSelection.model } : {}),
+            threadId: input.threadId,
+            // ProviderService persists this cursor and feeds it back into
+            // `startSession` after the in-memory session is lost (reaper /
+            // restart), so follow-ups continue the same conversation.
+            resumeCursor: {
+              schemaVersion: RESUME_VERSION,
+              sessionId: created.id,
+            },
+            createdAt,
+            updatedAt: createdAt,
+          };
+          const context: V2SessionContext = {
+            session,
+            openCodeSessionId: created.id,
+            serverUrl: server.url,
+            ...(server.serverPassword === undefined
+              ? {}
+              : { serverPassword: server.serverPassword }),
             directory,
-            ...(settings.serverUrl.trim().length > 0 ? { serverUrl: settings.serverUrl } : {}),
-            ...(serverPassword.length > 0 ? { serverPassword } : {}),
-            environment: options?.environment ?? process.env,
-          })
-          .pipe(
-            Effect.mapError((cause) => toRequestError("connectToServer", cause)),
-            Effect.provideService(Scope.Scope, sessionScope),
-          );
-        const created =
-          resumeSessionId !== undefined
-            ? { id: resumeSessionId }
-            : yield* runtime
-                .createSession({
-                  baseUrl: server.url,
-                  ...(server.serverPassword === undefined
-                    ? {}
-                    : { serverPassword: server.serverPassword }),
-                  directory,
-                  ...(input.title ? { title: input.title } : {}),
-                  ...(input.modelSelection?.model ? { modelSlug: input.modelSelection.model } : {}),
-                  ...(selectedVariant ? { variant: selectedVariant } : {}),
-                  ...(selectedAgent ? { agent: selectedAgent } : {}),
-                  permissions: buildV2PermissionRules(input.runtimeMode),
-                })
-                .pipe(Effect.mapError((cause) => toRequestError("session.create", cause)));
-        const createdAt = yield* nowIso;
-        const session: ProviderSession = {
-          provider: PROVIDER,
-          providerInstanceId: boundInstanceId,
-          status: "ready",
-          runtimeMode: input.runtimeMode,
-          cwd: directory,
-          ...(input.modelSelection?.model ? { model: input.modelSelection.model } : {}),
-          threadId: input.threadId,
-          createdAt,
-          updatedAt: createdAt,
-        };
-        const context: V2SessionContext = {
-          session,
-          openCodeSessionId: created.id,
-          serverUrl: server.url,
-          ...(server.serverPassword === undefined ? {} : { serverPassword: server.serverPassword }),
-          directory,
-          runtimeMode: input.runtimeMode,
-          modelSlug: input.modelSelection?.model,
-          variant: selectedVariant,
-          agent: selectedAgent,
-          fullAccess: input.runtimeMode === "full-access",
-          pendingPermissions: new Map(),
-          pendingForms: new Map(),
-          emittedTerminalRequestIds: new Set(),
-          activeTurnId: undefined,
-          inputTokens: 0,
-          outputTokens: 0,
-          reasoningTokens: 0,
-          cachedInputTokens: 0,
-          stopped: yield* Ref.make(false),
-          sessionScope,
-        };
-        sessions.set(input.threadId, context);
-        yield* subscribeSessionEvents(context);
-        yield* emit({
-          ...(yield* buildBase({ threadId: input.threadId })),
-          type: "session.started",
-          payload: { message: "OpenCode V2 session started" },
-        });
-        yield* emit({
-          ...(yield* buildBase({ threadId: input.threadId })),
-          type: "thread.started",
-          payload: { providerThreadId: context.openCodeSessionId },
-        });
-        return session;
+            runtimeMode: input.runtimeMode,
+            modelSlug: input.modelSelection?.model,
+            variant: selectedVariant,
+            agent: selectedAgent,
+            fullAccess: input.runtimeMode === "full-access",
+            pendingPermissions: new Map(),
+            pendingForms: new Map(),
+            emittedTerminalRequestIds: new Set(),
+            activeTurnId: undefined,
+            inputTokens: 0,
+            outputTokens: 0,
+            reasoningTokens: 0,
+            cachedInputTokens: 0,
+            stopped: yield* Ref.make(false),
+            sessionScope,
+          };
+          sessions.set(input.threadId, context);
+          yield* subscribeSessionEvents(context);
+          yield* emit({
+            ...(yield* buildBase({ threadId: input.threadId })),
+            type: "session.started",
+            payload: { message: "OpenCode V2 session started" },
+          });
+          yield* emit({
+            ...(yield* buildBase({ threadId: input.threadId })),
+            type: "thread.started",
+            payload: { providerThreadId: context.openCodeSessionId },
+          });
+          return session;
+        }).pipe(Effect.exit);
+        if (Exit.isFailure(startExit)) {
+          sessions.delete(input.threadId);
+          yield* Scope.close(sessionScope, Exit.void as never).pipe(Effect.ignore);
+          return yield* Effect.failCause(startExit.cause);
+        }
+        return startExit.value;
       }).pipe(Effect.mapError((cause) => wrapAdapterError(input.threadId, cause)));
 
     const sendTurn = (
@@ -1389,8 +1551,13 @@ export function makeOpenCodeV2Adapter(
         sessions.delete(threadId);
         yield* Ref.set(context.stopped, true);
         yield* cancelPendingForms(context);
+        // Best-effort interrupt so a running turn halts. The native session
+        // itself is intentionally KEPT server-side so a later resumeCursor
+        // can re-adopt it (mirrors v1, which aborts but never deletes).
+        // Deleting here would turn every reaper sweep into permanent
+        // amnesia: the persisted cursor would point at a destroyed session.
         yield* runtime
-          .deleteSession({
+          .interruptSession({
             baseUrl: context.serverUrl,
             ...(context.serverPassword === undefined
               ? {}
@@ -1652,6 +1819,11 @@ export function makeOpenCodeV2Adapter(
       context.outputTokens = 0;
       context.reasoningTokens = 0;
       context.cachedInputTokens = 0;
+      context.session = {
+        ...context.session,
+        resumeCursor: { schemaVersion: RESUME_VERSION, sessionId: forked.id },
+        updatedAt: yield* nowIso,
+      };
       yield* emit({
         ...(yield* buildBase({ threadId })),
         type: "thread.started",
